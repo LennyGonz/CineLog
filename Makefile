@@ -8,7 +8,7 @@ UVICORN := $(VENV)/bin/uvicorn
 APP := app.main:app
 PORT := 8000
 
-.PHONY: help venv install run dev fmt lint test clean \
+.PHONY: help venv install run dev format-write lint test clean \
         db-up db-down db-reset db-logs
 
 help:
@@ -18,7 +18,7 @@ help:
 	@echo "  make install    - install python deps from pyproject.toml"
 	@echo "  make run        - run api (no reload)"
 	@echo "  make dev        - run api with reload"
-	@echo "  make fmt        - format code (ruff)"
+	@echo "  make format-write - format code (ruff)"
 	@echo "  make lint       - lint code (ruff)"
 	@echo "  make test       - run tests (pytest)"
 	@echo "  make db-up      - start postgres (docker)"
@@ -36,16 +36,16 @@ install: venv
 	@$(PIP) install --upgrade pip
 	@$(PIP) install -e ".[dev]"
 
-run: install
+run: venv
 	@$(UVICORN) $(APP) --host 0.0.0.0 --port $(PORT)
 
-dev: install
+dev: venv
 	@$(UVICORN) $(APP) --reload --host 0.0.0.0 --port $(PORT)
 
-fmt: install
+format-write: venv
 	@$(VENV)/bin/ruff format .
 
-lint: install
+lint: venv
 	@$(VENV)/bin/ruff check .
 
 test: install

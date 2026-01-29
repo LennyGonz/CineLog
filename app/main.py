@@ -1,14 +1,39 @@
+"""
+FastAPI main application file.
+Routes delegate to business logic layer which orchestrates data access.
+"""
+
 import os
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-from typing import Dict, Literal, List, Tuple
-from datetime import datetime
+from typing import Literal, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from uuid import UUID
 
 from .db import get_db
+from .schemas import (
+    SwipeRequest,
+    MovieInteractionRequest,
+    FriendRequest,
+)
+from .business_logic import (
+    process_swipe,
+    get_user_swipes_list,
+    get_deck,
+    sync_genres_from_tmdb,
+    process_movie_interaction,
+    send_friend_request,
+    get_user_friends_list,
+    remove_friend,
+    get_user_master_list,
+    update_master_list_item,
+    delete_from_master_list,
+    get_friend_master_list,
+    get_user_watch_later,
+    update_watch_later_item,
+    delete_from_watch_later,
+)
 
 load_dotenv()
 
@@ -18,176 +43,243 @@ if not DATABASE_URL:
 
 app = FastAPI(title="CineLog API")
 
-# --- Temporary in-memory store for MVP wiring ---
-# Keyed by (user_id, movie_id) -> decision + timestamp
-SWIPES: Dict[Tuple[str, int], dict] = {}
 
-class SwipeRequest(BaseModel):
-    user_id: str = Field(default="demo", min_length=1)  # "demo" for MVP
-    movie_id: int = Field(gt=0)
-    decision: Literal["like", "nope"]
+# ========== HEALTH CHECKS ==========
 
-def _decision_to_int(decision: str) -> int:
-    return 1 if decision == "like" else -1
-
-
-class SwipeResponse(BaseModel):
-    ok: bool
-    user_id: str
-    movie_id: int
-    decision: Literal["like", "nope"]
-    swiped_at: str
 
 @app.get("/health")
 def health():
+    """Health check endpoint."""
     return {"status": "ok"}
 
 
 @app.get("/health/db")
 def health_db(db: Session = Depends(get_db)):
-    # Simple query to verify DB connectivity
-    db.execute(text("SELECT 1"))
+    """Database connectivity check."""
+    from .models import User
+
+    db.query(User).first()
     return {"status": "ok", "db": "connected"}
 
 
 @app.get("/debug/env")
 def debug_env():
+    """Debug endpoint - returns environment info."""
     return {
         "database_url": DATABASE_URL,
     }
 
 
+# ========== GENRE SYNC ==========
+
+
+@app.post("/sync/genres")
+def sync_genres(db: Session = Depends(get_db)):
+    """Fetch genres from TMDB and sync them to the database."""
+    try:
+        result = sync_genres_from_tmdb(db)
+        return result
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ========== DECK & SWIPING ==========
+
+
 @app.get("/deck")
-def deck(user_id: str = "demo", limit: int = 20, db: Session = Depends(get_db)):
-    # 1) Find user UUID (users.email == user_id for MVP)
-    user = db.execute(
-        text("SELECT id FROM users WHERE email = :email"),
-        {"email": user_id},
-    ).fetchone()
+def deck(
+    user_id: str = "demo",
+    limit: int = 20,
+    cursor: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Get a deck of movies for swiping with cursor-based pagination."""
+    return get_deck(db, user_id, limit, cursor)
 
-    user_uuid = user[0] if user else None
-
-    # 2) Get swiped movie ids
-    swiped_ids = set()
-    if user_uuid:
-        rows = db.execute(
-            text("SELECT movie_id FROM swipes WHERE user_id = :uid"),
-            {"uid": user_uuid},
-        ).fetchall()
-        swiped_ids = {r[0] for r in rows}
-
-    # 3) Deck source (MVP hardcoded list)
-    source: List[dict] = [
-        {"id": 550, "title": "Fight Club", "poster_path": "/bptfVGEQuv6vDTIMVCHjJ9Dz8PX.jpg"},
-        {"id": 680, "title": "Pulp Fiction", "poster_path": "/d5iIlFn5s0ImszYzBPb8JPIfbXD.jpg"},
-        {"id": 13, "title": "Forrest Gump", "poster_path": "/arw2vcBveWOVZr6pxd9XTd1TdQa.jpg"},
-        {"id": 603, "title": "The Matrix", "poster_path": "/f89U3ADr1oiB1s9GkdPOEpXUk5H.jpg"},
-        {"id": 155, "title": "The Dark Knight", "poster_path": "/qJ2tW6WMUDux911r6m7haRef0WH.jpg"},
-    ]
-
-    # 4) Filter out swiped movies
-    remaining = [m for m in source if m["id"] not in swiped_ids]
-
-    # 5) Upsert visible movies into DB (tiny cache builder)
-    for movie in remaining[:limit]:
-        db.execute(
-            text("""
-                INSERT INTO movies (id, title, poster_path, updated_at)
-                VALUES (:id, :title, :poster_path, now())
-                ON CONFLICT (id)
-                DO UPDATE SET
-                    title = EXCLUDED.title,
-                    poster_path = EXCLUDED.poster_path,
-                    updated_at = now()
-            """),
-            {
-                "id": movie["id"],
-                "title": movie["title"],
-                "poster_path": movie.get("poster_path"),
-            },
-        )
-
-    db.commit()
-
-    # 6) Return deck
-    return remaining[:limit]
 
 @app.post("/swipe")
 def swipe(req: SwipeRequest, db: Session = Depends(get_db)):
-    # 1) Ensure a user row exists (demo user or future auth user)
-    # For MVP, treat user_id="demo" as a stable pseudo-user.
-    # We'll store it in users.email for now.
-    user_row = db.execute(
-        text("""
-            INSERT INTO users (email)
-            VALUES (:email)
-            ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-            RETURNING id
-        """),
-        {"email": req.user_id},
-    ).fetchone()
-    user_uuid = user_row[0]
-
-    # 2) Ensure the movie exists in our movies cache.
-    # For now, we store a placeholder title if we don't have details yet.
-    db.execute(
-        text("""
-            INSERT INTO movies (id, title, updated_at)
-            VALUES (:movie_id, :title, now())
-            ON CONFLICT (id) DO UPDATE SET updated_at = now()
-        """),
-        {"movie_id": req.movie_id, "title": f"TMDB:{req.movie_id}"},
-    )
-
-    # 3) Insert swipe (block duplicates via PK(user_id, movie_id))
-    decision_int = _decision_to_int(req.decision)
-
+    """Process a swipe (like/nope) from a user."""
     try:
-        db.execute(
-            text("""
-                INSERT INTO swipes (user_id, movie_id, decision)
-                VALUES (:user_id, :movie_id, :decision)
-            """),
-            {"user_id": user_uuid, "movie_id": req.movie_id, "decision": decision_int},
-        )
-        db.commit()
-    except Exception:
+        return process_swipe(db, req.user_id, req.movie_id, req.decision)
+    except Exception as e:
         db.rollback()
-        # Most likely duplicate swipe due to PK constraint
-        raise HTTPException(status_code=409, detail="Already swiped")
+        if "duplicate" in str(e).lower() or "already" in str(e).lower():
+            raise HTTPException(status_code=409, detail="Already swiped")
+        raise HTTPException(status_code=400, detail=str(e))
 
-    return {
-        "ok": True,
-        "user_id": req.user_id,
-        "movie_id": req.movie_id,
-        "decision": req.decision,
-    }
 
 @app.get("/swipes")
 def get_swipes(user_id: str = "demo", db: Session = Depends(get_db)):
-    user = db.execute(
-        text("SELECT id FROM users WHERE email = :email"),
-        {"email": user_id},
-    ).fetchone()
+    """Get all swipes for a user."""
+    return get_user_swipes_list(db, user_id)
 
-    if not user:
-        return []
 
-    user_uuid = user[0]
-    rows = db.execute(
-        text("""
-            SELECT movie_id, decision, swiped_at
-            FROM swipes
-            WHERE user_id = :user_id
-            ORDER BY swiped_at DESC
-        """),
-        {"user_id": user_uuid},
-    ).fetchall()
+# ========== MOVIE INTERACTIONS ==========
 
-    def to_label(dec: int) -> str:
-        return "like" if dec == 1 else "nope"
 
-    return [
-        {"movie_id": r[0], "decision": to_label(r[1]), "swiped_at": r[2].isoformat()}
-        for r in rows
-    ]
+@app.post("/movie-interaction")
+def movie_interaction(req: MovieInteractionRequest, db: Session = Depends(get_db)):
+    """Handle movie interaction flow (seen/unseen, like/nope, want to see)."""
+    try:
+        return process_movie_interaction(
+            db,
+            req.user_id,
+            req.movie_id,
+            req.have_you_seen,
+            req.did_you_like,
+            req.want_to_see,
+            req.rating,
+            req.notes,
+            req.priority,
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ========== FRIENDS ==========
+
+
+@app.post("/friends/add")
+def add_friend(req: FriendRequest, db: Session = Depends(get_db)):
+    """Send a friend request."""
+    try:
+        return send_friend_request(db, req.user_id, req.friend_email)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/friends")
+def get_friends(user_id: str = "demo", db: Session = Depends(get_db)):
+    """Get all friends of a user (accepted friendships only)."""
+    return get_user_friends_list(db, user_id)
+
+
+@app.post("/friends/{friend_id}/remove")
+def remove_friend_endpoint(friend_id: str, user_id: str = "demo", db: Session = Depends(get_db)):
+    """Remove a friendship."""
+    try:
+        return remove_friend(db, user_id, UUID(friend_id))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ========== MASTER LIST ==========
+
+
+@app.get("/master-list")
+def get_master_list_endpoint(
+    user_id: str = "demo",
+    genre_id: Optional[int] = None,
+    sort_by: Literal["date_added", "rating"] = "date_added",
+    db: Session = Depends(get_db),
+):
+    """Get user's own master list."""
+    return get_user_master_list(db, user_id, genre_id, sort_by)
+
+
+@app.put("/master-list/{movie_id}")
+def update_master_list_endpoint(
+    movie_id: int,
+    user_id: str = "demo",
+    rating: Optional[float] = Query(None, ge=0, le=5),
+    notes: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Update rating and/or notes for a movie in the master list."""
+    try:
+        return update_master_list_item(db, user_id, movie_id, rating, notes)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/master-list/{movie_id}")
+def delete_master_list_endpoint(
+    movie_id: int,
+    user_id: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Remove a movie from the master list."""
+    try:
+        return delete_from_master_list(db, user_id, movie_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/friends/{friend_id}/master-list")
+def get_friend_master_list_endpoint(
+    friend_id: str,
+    user_id: str = "demo",
+    genre_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """Get a friend's master list (only if friends)."""
+    try:
+        return get_friend_master_list(db, user_id, UUID(friend_id), genre_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=404 if "not found" in str(e).lower() else 403, detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ========== WATCH LATER LIST ==========
+
+
+@app.get("/watch-later-list")
+def get_watch_later_endpoint(
+    user_id: str = "demo",
+    genre_id: Optional[int] = None,
+    sort_by: Literal["date_added", "priority"] = "priority",
+    db: Session = Depends(get_db),
+):
+    """Get user's watch later list."""
+    return get_user_watch_later(db, user_id, genre_id, sort_by)
+
+
+@app.put("/watch-later-list/{movie_id}")
+def update_watch_later_endpoint(
+    movie_id: int,
+    user_id: str = "demo",
+    priority: int = Query(1, ge=1, le=5),
+    db: Session = Depends(get_db),
+):
+    """Update priority for a movie in the watch later list."""
+    try:
+        return update_watch_later_item(db, user_id, movie_id, priority)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/watch-later-list/{movie_id}")
+def delete_watch_later_endpoint(
+    movie_id: int,
+    user_id: str = "demo",
+    db: Session = Depends(get_db),
+):
+    """Remove a movie from the watch later list."""
+    try:
+        return delete_from_watch_later(db, user_id, movie_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
