@@ -12,10 +12,12 @@ from sqlalchemy.orm import Session
 from uuid import UUID
 
 from .db import get_db
+from .auth import get_current_user, AuthUser
 from .schemas import (
     SwipeRequest,
     MovieInteractionRequest,
     FriendRequest,
+    FriendAcceptRequest,
     SignupRequest,
     SignupResponse,
 )
@@ -26,6 +28,8 @@ from .business_logic import (
     sync_genres_from_tmdb,
     process_movie_interaction,
     send_friend_request,
+    accept_friend_request,
+    get_friend_requests,
     get_user_friends_list,
     remove_friend,
     get_user_master_list,
@@ -66,18 +70,24 @@ def health_db(db: Session = Depends(get_db)):
 
 
 @app.get("/debug/env")
-def debug_env():
+def debug_env(current_user: AuthUser = Depends(get_current_user)):
     """Debug endpoint - returns environment info."""
     return {
         "database_url": DATABASE_URL,
     }
 
 
+@app.get("/me")
+def me(current_user: AuthUser = Depends(get_current_user)):
+    """Return the authenticated user's identity."""
+    return {"id": current_user.id, "email": current_user.email}
+
+
 # ========== GENRE SYNC ==========
 
 
 @app.post("/sync/genres")
-def sync_genres(db: Session = Depends(get_db)):
+def sync_genres(db: Session = Depends(get_db), current_user: AuthUser = Depends(get_current_user)):
     """Fetch genres from TMDB and sync them to the database."""
     try:
         result = sync_genres_from_tmdb(db)
@@ -88,14 +98,14 @@ def sync_genres(db: Session = Depends(get_db)):
 
 
 @app.post("/signup", response_model=SignupResponse)
-def signup(req: SignupRequest, db: Session = Depends(get_db)):
-    """Create a user by email (id returned).
-
-    Note: this is intentionally lightweight and creates a user record by email.
-    Authentication and passwords are out-of-scope for this simple signup.
-    """
+def signup(
+    req: SignupRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Ensure a user record exists for the authenticated Supabase user."""
     try:
-        user = edit.create_or_get_user(db, req.email)
+        user = edit.create_or_get_user_by_id(db, UUID(current_user.id), email=current_user.email)
         db.commit()
 
         return {
@@ -114,20 +124,24 @@ def signup(req: SignupRequest, db: Session = Depends(get_db)):
 
 @app.get("/deck")
 def deck(
-    user_id: str = "demo",
     limit: int = 20,
     cursor: Optional[str] = None,
     db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """Get a deck of movies for swiping with cursor-based pagination."""
-    return get_deck(db, user_id, limit, cursor)
+    return get_deck(db, current_user.id, limit, cursor)
 
 
 @app.post("/swipe")
-def swipe(req: SwipeRequest, db: Session = Depends(get_db)):
+def swipe(
+    req: SwipeRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
     """Process a swipe (like/nope) from a user."""
     try:
-        return process_swipe(db, req.user_id, req.movie_id, req.decision)
+        return process_swipe(db, current_user.id, req.movie_id, req.decision)
     except Exception as e:
         db.rollback()
         if "duplicate" in str(e).lower() or "already" in str(e).lower():
@@ -136,21 +150,25 @@ def swipe(req: SwipeRequest, db: Session = Depends(get_db)):
 
 
 @app.get("/swipes")
-def get_swipes(user_id: str = "demo", db: Session = Depends(get_db)):
+def get_swipes(db: Session = Depends(get_db), current_user: AuthUser = Depends(get_current_user)):
     """Get all swipes for a user."""
-    return get_user_swipes_list(db, user_id)
+    return get_user_swipes_list(db, current_user.id)
 
 
 # ========== MOVIE INTERACTIONS ==========
 
 
 @app.post("/movie-interaction")
-def movie_interaction(req: MovieInteractionRequest, db: Session = Depends(get_db)):
+def movie_interaction(
+    req: MovieInteractionRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
     """Handle movie interaction flow (seen/unseen, like/nope, want to see)."""
     try:
         return process_movie_interaction(
             db,
-            req.user_id,
+            current_user.id,
             req.movie_id,
             req.have_you_seen,
             req.did_you_like,
@@ -168,10 +186,14 @@ def movie_interaction(req: MovieInteractionRequest, db: Session = Depends(get_db
 
 
 @app.post("/friends/add")
-def add_friend(req: FriendRequest, db: Session = Depends(get_db)):
+def add_friend(
+    req: FriendRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
     """Send a friend request."""
     try:
-        return send_friend_request(db, req.user_id, req.friend_email)
+        return send_friend_request(db, current_user.id, req.friend_email)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -179,17 +201,46 @@ def add_friend(req: FriendRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/friends/accept")
+def accept_friend(
+    req: FriendAcceptRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Accept a pending friend request."""
+    try:
+        return accept_friend_request(db, current_user.id, UUID(req.friend_id))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/friends/requests")
+def friend_requests(
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Get incoming/outgoing pending friend requests."""
+    return get_friend_requests(db, current_user.id)
+
+
 @app.get("/friends")
-def get_friends(user_id: str = "demo", db: Session = Depends(get_db)):
+def get_friends(db: Session = Depends(get_db), current_user: AuthUser = Depends(get_current_user)):
     """Get all friends of a user (accepted friendships only)."""
-    return get_user_friends_list(db, user_id)
+    return get_user_friends_list(db, current_user.id)
 
 
 @app.post("/friends/{friend_id}/remove")
-def remove_friend_endpoint(friend_id: str, user_id: str = "demo", db: Session = Depends(get_db)):
+def remove_friend_endpoint(
+    friend_id: str,
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
+):
     """Remove a friendship."""
     try:
-        return remove_friend(db, user_id, UUID(friend_id))
+        return remove_friend(db, current_user.id, UUID(friend_id))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -202,26 +253,26 @@ def remove_friend_endpoint(friend_id: str, user_id: str = "demo", db: Session = 
 
 @app.get("/master-list")
 def get_master_list_endpoint(
-    user_id: str = "demo",
     genre_id: Optional[int] = None,
     sort_by: Literal["date_added", "rating"] = "date_added",
     db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """Get user's own master list."""
-    return get_user_master_list(db, user_id, genre_id, sort_by)
+    return get_user_master_list(db, current_user.id, genre_id, sort_by)
 
 
 @app.put("/master-list/{movie_id}")
 def update_master_list_endpoint(
     movie_id: int,
-    user_id: str = "demo",
     rating: Optional[float] = Query(None, ge=0, le=5),
     notes: Optional[str] = Query(None),
     db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """Update rating and/or notes for a movie in the master list."""
     try:
-        return update_master_list_item(db, user_id, movie_id, rating, notes)
+        return update_master_list_item(db, current_user.id, movie_id, rating, notes)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -232,12 +283,12 @@ def update_master_list_endpoint(
 @app.delete("/master-list/{movie_id}")
 def delete_master_list_endpoint(
     movie_id: int,
-    user_id: str = "demo",
     db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """Remove a movie from the master list."""
     try:
-        return delete_from_master_list(db, user_id, movie_id)
+        return delete_from_master_list(db, current_user.id, movie_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -248,13 +299,13 @@ def delete_master_list_endpoint(
 @app.get("/friends/{friend_id}/master-list")
 def get_friend_master_list_endpoint(
     friend_id: str,
-    user_id: str = "demo",
     genre_id: Optional[int] = None,
     db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """Get a friend's master list (only if friends)."""
     try:
-        return get_friend_master_list(db, user_id, UUID(friend_id), genre_id)
+        return get_friend_master_list(db, current_user.id, UUID(friend_id), genre_id)
     except ValueError as e:
         raise HTTPException(
             status_code=404 if "not found" in str(e).lower() else 403, detail=str(e)
@@ -268,25 +319,25 @@ def get_friend_master_list_endpoint(
 
 @app.get("/watch-later-list")
 def get_watch_later_endpoint(
-    user_id: str = "demo",
     genre_id: Optional[int] = None,
     sort_by: Literal["date_added", "priority"] = "priority",
     db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """Get user's watch later list."""
-    return get_user_watch_later(db, user_id, genre_id, sort_by)
+    return get_user_watch_later(db, current_user.id, genre_id, sort_by)
 
 
 @app.put("/watch-later-list/{movie_id}")
 def update_watch_later_endpoint(
     movie_id: int,
-    user_id: str = "demo",
     priority: int = Query(1, ge=1, le=5),
     db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """Update priority for a movie in the watch later list."""
     try:
-        return update_watch_later_item(db, user_id, movie_id, priority)
+        return update_watch_later_item(db, current_user.id, movie_id, priority)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -297,12 +348,12 @@ def update_watch_later_endpoint(
 @app.delete("/watch-later-list/{movie_id}")
 def delete_watch_later_endpoint(
     movie_id: int,
-    user_id: str = "demo",
     db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_user),
 ):
     """Remove a movie from the watch later list."""
     try:
-        return delete_from_watch_later(db, user_id, movie_id)
+        return delete_from_watch_later(db, current_user.id, movie_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

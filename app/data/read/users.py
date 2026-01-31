@@ -80,6 +80,38 @@ def get_user_friends(db: Session, user_id: UUID) -> List[Tuple]:
     return outgoing, incoming
 
 
+def get_pending_friend_requests(db: Session, user_id: UUID) -> List[Tuple]:
+    """Get all pending friend requests for a user (outgoing, incoming)."""
+    outgoing = (
+        db.query(Friendship)
+        .filter(Friendship.user_id == user_id, Friendship.status == "pending")
+        .all()
+    )
+
+    incoming = (
+        db.query(Friendship)
+        .filter(Friendship.friend_id == user_id, Friendship.status == "pending")
+        .all()
+    )
+
+    return outgoing, incoming
+
+
+def get_incoming_friend_request(
+    db: Session, user_id: UUID, friend_id: UUID
+) -> Optional[Friendship]:
+    """Get a pending incoming friend request (friend_id -> user_id)."""
+    return (
+        db.query(Friendship)
+        .filter(
+            Friendship.user_id == friend_id,
+            Friendship.friend_id == user_id,
+            Friendship.status == "pending",
+        )
+        .first()
+    )
+
+
 def get_friendship(db: Session, user_id: UUID, friend_id: UUID) -> Optional[Friendship]:
     """Get friendship relationship (bidirectional)."""
     return (

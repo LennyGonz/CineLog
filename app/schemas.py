@@ -7,7 +7,7 @@ from typing import Literal, List, Optional
 
 
 class SwipeRequest(BaseModel):
-    user_id: str = Field(default="demo", min_length=1)
+    user_id: Optional[str] = None
     movie_id: int = Field(gt=0)
     decision: Literal["like", "nope"]
 
@@ -21,7 +21,7 @@ class SwipeResponse(BaseModel):
 
 
 class MovieInteractionRequest(BaseModel):
-    user_id: str = Field(default="demo", min_length=1)
+    user_id: Optional[str] = None
     movie_id: int = Field(gt=0)
     have_you_seen: bool
     did_you_like: Optional[bool] = None
@@ -40,8 +40,12 @@ class MovieInteractionResponse(BaseModel):
 
 
 class FriendRequest(BaseModel):
-    user_id: str = Field(default="demo", min_length=1)
+    user_id: Optional[str] = None
     friend_email: str = Field(min_length=1)
+
+
+class FriendAcceptRequest(BaseModel):
+    friend_id: str = Field(min_length=1)
 
 
 class FriendResponse(BaseModel):

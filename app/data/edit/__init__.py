@@ -4,7 +4,9 @@ Edit operations exports.
 
 from .users import (
     create_or_get_user,
+    create_or_get_user_by_id,
     ensure_user_exists,
+    ensure_user_exists_by_id,
 )
 
 from .movies import (
@@ -36,7 +38,9 @@ from .friendships import (
 __all__ = [
     # Users
     "create_or_get_user",
+    "create_or_get_user_by_id",
     "ensure_user_exists",
+    "ensure_user_exists_by_id",
     # Movies
     "create_or_update_movie",
     "ensure_movie_exists",

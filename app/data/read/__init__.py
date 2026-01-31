@@ -11,6 +11,8 @@ from .users import (
     get_user_seen_movie_ids,
     get_user_swipes,
     get_user_friends,
+    get_pending_friend_requests,
+    get_incoming_friend_request,
     get_friendship,
 )
 
@@ -38,6 +40,8 @@ __all__ = [
     "get_user_seen_movie_ids",
     "get_user_swipes",
     "get_user_friends",
+    "get_pending_friend_requests",
+    "get_incoming_friend_request",
     "get_friendship",
     # Movies
     "get_movie_by_id",

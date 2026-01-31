@@ -19,9 +19,8 @@ def process_swipe(db: Session, user_id: str, movie_id: int, decision: str) -> Di
     Process a swipe (like/nope) from a user.
     Returns response dict with ok status and details.
     """
-    # Get or create user
-    user = edit.ensure_user_exists(db, user_id)
-    user_uuid = user.id
+    user_uuid = UUID(user_id)
+    edit.ensure_user_exists_by_id(db, user_uuid)
 
     # Ensure movie exists
     edit.ensure_movie_exists(db, movie_id)
@@ -44,7 +43,7 @@ def get_user_swipes_list(db: Session, user_id: str) -> List[Dict[str, Any]]:
     """
     Get all swipes for a user with formatted response.
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
 
     if not user:
         return []
@@ -73,7 +72,7 @@ def get_deck(
     start_page, start_index = decode_cursor(cursor) if cursor else (1, 0)
 
     # Get user
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     user_uuid = user.id if user else None
 
     # Get already seen movie IDs
@@ -189,9 +188,8 @@ def process_movie_interaction(
     """
     Process movie interaction (seen/unseen, like/nope, want to see).
     """
-    # Get or create user
-    user = edit.ensure_user_exists(db, user_id)
-    user_uuid = user.id
+    user_uuid = UUID(user_id)
+    edit.ensure_user_exists_by_id(db, user_uuid)
 
     # Ensure movie exists
     edit.ensure_movie_exists(db, movie_id)
@@ -233,7 +231,7 @@ def send_friend_request(db: Session, user_id: str, friend_email: str) -> Dict[st
     Send a friend request from one user to another.
     """
     # Get users
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         raise ValueError("User not found")
 
@@ -254,11 +252,71 @@ def send_friend_request(db: Session, user_id: str, friend_email: str) -> Dict[st
     }
 
 
+def accept_friend_request(db: Session, user_id: str, friend_id: UUID) -> Dict[str, Any]:
+    """
+    Accept a pending friend request (friend_id -> user_id).
+    """
+    user = read.get_user_by_id(db, UUID(user_id))
+    if not user:
+        raise ValueError("User not found")
+
+    pending = read.get_incoming_friend_request(db, user.id, friend_id)
+    if not pending:
+        raise ValueError("No pending friend request")
+
+    edit.create_or_update_friendship(db, friend_id, user.id, status="accepted")
+    db.commit()
+
+    return {"ok": True, "message": "Friend request accepted"}
+
+
+def get_friend_requests(db: Session, user_id: str) -> Dict[str, Any]:
+    """
+    Get incoming/outgoing pending friend requests.
+    """
+    user = read.get_user_by_id(db, UUID(user_id))
+    if not user:
+        return {"incoming": [], "outgoing": []}
+
+    outgoing, incoming = read.get_pending_friend_requests(db, user.id)
+
+    outgoing_list = []
+    for f in outgoing:
+        friend = read.get_user_by_id(db, f.friend_id)
+        if friend:
+            outgoing_list.append(
+                {
+                    "id": str(f.friend_id),
+                    "email": friend.email,
+                    "status": "pending",
+                    "created_at": f.created_at.isoformat(),
+                }
+            )
+
+    incoming_list = []
+    for f in incoming:
+        friend = read.get_user_by_id(db, f.user_id)
+        if friend:
+            incoming_list.append(
+                {
+                    "id": str(f.user_id),
+                    "email": friend.email,
+                    "status": "pending",
+                    "created_at": f.created_at.isoformat(),
+                }
+            )
+
+    incoming_list.sort(key=lambda x: x["created_at"], reverse=True)
+    outgoing_list.sort(key=lambda x: x["created_at"], reverse=True)
+
+    return {"incoming": incoming_list, "outgoing": outgoing_list}
+
+
 def get_user_friends_list(db: Session, user_id: str) -> List[Dict[str, Any]]:
     """
     Get list of accepted friends for a user.
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         return []
 
@@ -302,7 +360,7 @@ def remove_friend(db: Session, user_id: str, friend_id: UUID) -> Dict[str, Any]:
     """
     Remove a friend relationship (bidirectional).
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         raise ValueError("User not found")
 
@@ -321,7 +379,7 @@ def get_user_master_list(
     """
     Get user's master list with optional genre filter and sorting.
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         return []
 
@@ -358,7 +416,7 @@ def update_master_list_item(
     """
     Update a master list item (rating/notes).
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         raise ValueError("User not found")
 
@@ -376,7 +434,7 @@ def delete_from_master_list(db: Session, user_id: str, movie_id: int) -> Dict[st
     """
     Remove a movie from master list.
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         raise ValueError("User not found")
 
@@ -395,7 +453,7 @@ def get_friend_master_list(
     """
     Get a friend's master list (only if friends).
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         raise ValueError("User not found")
 
@@ -435,7 +493,7 @@ def get_user_watch_later(
     """
     Get user's watch later list with optional genre filter and sorting.
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         return []
 
@@ -467,7 +525,7 @@ def update_watch_later_item(
     """
     Update a watch later list item (priority).
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         raise ValueError("User not found")
 
@@ -485,7 +543,7 @@ def delete_from_watch_later(db: Session, user_id: str, movie_id: int) -> Dict[st
     """
     Remove a movie from watch later list.
     """
-    user = read.get_user_by_email(db, user_id)
+    user = read.get_user_by_id(db, UUID(user_id))
     if not user:
         raise ValueError("User not found")
 
