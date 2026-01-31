@@ -16,6 +16,8 @@ from .schemas import (
     SwipeRequest,
     MovieInteractionRequest,
     FriendRequest,
+    SignupRequest,
+    SignupResponse,
 )
 from .business_logic import (
     process_swipe,
@@ -34,6 +36,7 @@ from .business_logic import (
     update_watch_later_item,
     delete_from_watch_later,
 )
+from .data import edit
 
 load_dotenv()
 
@@ -79,6 +82,28 @@ def sync_genres(db: Session = Depends(get_db)):
     try:
         result = sync_genres_from_tmdb(db)
         return result
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/signup", response_model=SignupResponse)
+def signup(req: SignupRequest, db: Session = Depends(get_db)):
+    """Create a user by email (id returned).
+
+    Note: this is intentionally lightweight and creates a user record by email.
+    Authentication and passwords are out-of-scope for this simple signup.
+    """
+    try:
+        user = edit.create_or_get_user(db, req.email)
+        db.commit()
+
+        return {
+            "ok": True,
+            "id": str(user.id),
+            "email": user.email,
+            "created_at": user.created_at.isoformat(),
+        }
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))

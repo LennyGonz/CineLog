@@ -68,3 +68,14 @@ class WatchLaterItem(BaseModel):
     genres: List[dict] = []
     priority: int
     added_at: str
+
+
+class SignupRequest(BaseModel):
+    email: str = Field(min_length=1)
+
+
+class SignupResponse(BaseModel):
+    ok: bool
+    id: str
+    email: str
+    created_at: str
